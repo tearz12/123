@@ -9,16 +9,18 @@ export PROJECT_ROOT=$(shell pwd)
 
 
 env-up: ## env: Запустить окружение проекта
-	@docker compose up -d todoapp-postgres
+	@docker compose up -d todoapp-postgres todoapp-redis
 
 env-down: ## env: Остановить окружение проекта
-	@docker compose down todoapp-postgres
+	@docker compose down todoapp-postgres todoapp-redis
 
 env-cleanup: ## env: Очистить окружение проекта
 	@read -p "Очистить все volume файлы окружения? Опасность утери данных. [y/N]: " ans; \
 	if [ "$$ans" = "y" ]; then \
-		docker compose down todoapp-postgres port-forwarder && \
+		docker compose down todoapp-postgres todoapp-redis port-forwarder web-server && \
 		rm -rf ${PROJECT_ROOT}/out/pgdata && \
+		rm -rf ${PROJECT_ROOT}/out/redis_data && \
+		rm -rf ${PROJECT_ROOT}/out/caddy_data && \
 		echo "Файлы окружения очищены"; \
 	else \
 		echo "Очистка окружения отменена"; \
@@ -90,6 +92,22 @@ todoapp-deploy: ## Golang приложение: Запустить в Docker Com
 todoapp-undeploy: ## Golang приложение: Остановить Docker Compose сервис
 	@docker compose down todoapp
 
+web-deploy: ## Web-Сервер: Запустить Caddy в Docker Compose сервисе
+	@docker compose up -d --build web-server
+
+web-undeploy: ## Web-Сервер: Остановить Docker Compose сервис
+	@docker compose down web-server
+
+load-test: ## Тесты: нагрузочное тестирование
+	@go run scripts/load_test/main.go \
+		-users 10 \
+		-tasks-per-user 1000 \
+		-concurrency 100 \
+		-phase-duration 30s \
+		-read-burst 50 \
+		-mixed-reads 10 \
+		-mixed-writes 1 \
+		-report ${PROJECT_ROOT}/out/load_test/result.txt
 
 help: ## Показать справку по командам
 	@echo "=== Центр управления проектом ==="

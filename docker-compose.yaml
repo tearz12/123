@@ -1,4 +1,18 @@
 services:
+  web-server:
+    image: caddy:2.11.1-alpine
+    container_name: web-server
+    environment:
+      - CADDY_HOST=${CADDY_HOST:-localhost}
+    volumes:
+      - ${PROJECT_ROOT}/web/Caddyfile:/etc/caddy/Caddyfile
+      - ${PROJECT_ROOT}/out/caddy_data:/data
+      - ${PROJECT_ROOT}/web/public:/web/public
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: always
+
   todoapp:
     build:
       context: ${PROJECT_ROOT}
@@ -13,8 +27,6 @@ services:
       - LOGGER_FOLDER=/app/out/logs
     volumes:
       - ${PROJECT_ROOT}/out/logs:/app/out/logs
-    ports:
-      - "5050:5050"
     restart: always
 
   todoapp-postgres:
@@ -28,6 +40,14 @@ services:
       - ${PROJECT_ROOT}/out/pgdata:/var/lib/postgresql
     restart: always
 
+  todoapp-redis:
+    image: redis:8.6.1
+    container_name: todoapp-env-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - ${PROJECT_ROOT}/out/redis_data:/data
+    restart: always
+
   todoapp-postgres-migrate:
     image: migrate/migrate:v4.19.1
     volumes:
@@ -36,9 +56,15 @@ services:
   port-forwarder:
     image: alpine/socat:1.8.0.3
     container_name: todoapp-env-port-forwarder
-    command: tcp-listen:5432,fork,reuseaddr tcp-connect:todoapp-postgres:5432
+    entrypoint: |
+      /bin/sh -c "
+        socat -d -d tcp-listen:5432,fork,reuseaddr tcp-connect:todoapp-postgres:5432 &
+        socat -d -d tcp-listen:6379,fork,reuseaddr tcp-connect:todoapp-redis:6379 &
+        wait
+      "
     ports:
       - "127.0.0.1:5432:5432"
+      - "127.0.0.1:6379:6379"
 
   swagger:
     build:

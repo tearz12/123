@@ -16,20 +16,19 @@ import (
 	core_config "github.com/nilchan-social/golang-todoapp/internal/core/config"
 	core_logger "github.com/nilchan-social/golang-todoapp/internal/core/logger"
 	core_pgx_pool "github.com/nilchan-social/golang-todoapp/internal/core/repository/postgres/pool/pgx"
+	core_goredis_pool "github.com/nilchan-social/golang-todoapp/internal/core/repository/redis/pool/goredis"
 	core_http_middleware "github.com/nilchan-social/golang-todoapp/internal/core/transport/http/middleware"
 	core_http_server "github.com/nilchan-social/golang-todoapp/internal/core/transport/http/server"
 	statistics_postgres_repository "github.com/nilchan-social/golang-todoapp/internal/features/statistics/repository/postgres"
 	statistics_service "github.com/nilchan-social/golang-todoapp/internal/features/statistics/service"
 	statistics_transport_http "github.com/nilchan-social/golang-todoapp/internal/features/statistics/transport/http"
-	tasks_postgres_repository "github.com/nilchan-social/golang-todoapp/internal/features/tasks/repository/postgres"
-	tasks_service "github.com/nilchan-social/golang-todoapp/internal/features/tasks/service"
-	tasks_transport_http "github.com/nilchan-social/golang-todoapp/internal/features/tasks/transport/http"
+	tasks_service "github.com/nilchan-social/golang-todoapp/internal/features/tasks"
+	tasks_http "github.com/nilchan-social/golang-todoapp/internal/features/tasks/adapters/in/transport/http"
+	tasks_cached "github.com/nilchan-social/golang-todoapp/internal/features/tasks/adapters/out/repository/cached"
+	tasks_postgres "github.com/nilchan-social/golang-todoapp/internal/features/tasks/adapters/out/repository/postgres"
 	users_postgres_repository "github.com/nilchan-social/golang-todoapp/internal/features/users/repository/postgres"
 	users_service "github.com/nilchan-social/golang-todoapp/internal/features/users/service"
 	users_transport_http "github.com/nilchan-social/golang-todoapp/internal/features/users/transport/http"
-	web_fs_repository "github.com/nilchan-social/golang-todoapp/internal/features/web/repository/file_system"
-	web_service "github.com/nilchan-social/golang-todoapp/internal/features/web/service"
-	web_transport_http "github.com/nilchan-social/golang-todoapp/internal/features/web/transport/http"
 	"go.uber.org/zap"
 
 	// Импорт пакета docs регистрирует Swagger-спецификацию в глобальной переменной.
@@ -82,6 +81,16 @@ func main() {
 	}
 	defer postgresPool.Close()
 
+	// Создаём пулл соединений с Redis через библиотеку go-redis.
+	redisPool, err := core_goredis_pool.NewPool(
+		ctx,
+		core_goredis_pool.NewConfigMust(),
+	)
+	if err != nil {
+		logger.Fatal("failed to init redis connection pool", zap.Error(err))
+	}
+	defer redisPool.Close()
+
 	// Ручное внедрение зависимостей (Dependency Injection):
 	// Repository → Service → HTTP Handler.
 	// Каждый слой знает только об интерфейсе нижележащего.
@@ -92,20 +101,26 @@ func main() {
 	usersService := users_service.NewUsersService(usersRepository)
 	usersTransportHTTP := users_transport_http.NewUsersHTTPHandler(usersService)
 
+	// CachedRepository оборачивает PostgresRepository, добавляя Redis-кеш:
+	// все чтения сначала проверяют кеш, мутации инвалидируют его.
+	// Чтобы отключить кеш (например, для отладки), замените на строку ниже.
 	logger.Debug("initializing feature", zap.String("feature", "tasks"))
-	tasksRepository := tasks_postgres_repository.NewTasksRepository(postgresPool)
+	tasksRepository := tasks_cached.NewCachedRepository(
+		redisPool,
+		tasks_postgres.NewTasksRepository(postgresPool),
+	)
+	/*
+		Пример создания обычного Postgres репозитория:
+
+		tasksRepository := tasks_postgres.NewTasksRepository(postgresPool)
+	*/
 	tasksService := tasks_service.NewTasksService(tasksRepository)
-	tasksTransportHTTP := tasks_transport_http.NewTasksHTTPHandler(tasksService)
+	tasksTransportHTTP := tasks_http.NewTasksHTTPHandler(tasksService)
 
 	logger.Debug("initializing feature", zap.String("feature", "statistics"))
 	statisticsRepository := statistics_postgres_repository.NewStatisticsRepository(postgresPool)
 	statisticsService := statistics_service.NewStatisticsService(statisticsRepository)
 	statisticsTransportHTTP := statistics_transport_http.NewStatisticsHTTPHandler(statisticsService)
-
-	logger.Debug("initializing feature", zap.String("feature", "web"))
-	webRepository := web_fs_repository.NewWebRepository()
-	webService := web_service.NewWebService(webRepository)
-	webTransportHTTP := web_transport_http.NewWebHTTPHandler(webService)
 
 	// Собираем HTTP-сервер с цепочкой middleware.
 	// Middleware применяются ко всем маршрутам (Route) в порядке объявления:
@@ -143,8 +158,6 @@ func main() {
 		apiVersionRouterV1,
 		// apiVersionRouterV2,
 	)
-	// Регистрируем маршруты, не принадлежащие к какой-то определённой версии API (главная страница).
-	httpServer.RegisterRoutes(webTransportHTTP.Routes()...)
 	// Регистрируем Swagger UI по адресу /swagger/.
 	httpServer.RegisterSwagger()
 
